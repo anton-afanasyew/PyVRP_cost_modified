@@ -1,11 +1,13 @@
 #include "ProblemData.h"
 
+#include <algorithm>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
 
 using pyvrp::Distance;
 using pyvrp::Duration;
+using pyvrp::Load;
 using pyvrp::Matrix;
 using pyvrp::ProblemData;
 
@@ -14,19 +16,29 @@ namespace
 // Small local helper for what is essentially strdup() from the C23 standard,
 // which my compiler does not (yet) have. See here for the actual recipe:
 // https://stackoverflow.com/a/252802/4316405 (modified to use new instead of
-// malloc).
+// malloc). We do all this so we can use C-style strings, rather than C++'s
+// std::string, which are much larger objects.
 static char *duplicate(char const *src)
 {
     char *dst = new char[std::strlen(src) + 1];  // space for src + null
     std::strcpy(dst, src);
     return dst;
 }
+
+// Pad vec1 with zeroes to the size of vec1 and vec2, whichever is larger.
+auto &pad(auto &vec1, auto const &vec2)
+{
+    vec1.resize(std::max(vec1.size(), vec2.size()));
+    return vec1;
+}
+
+bool isNegative(auto value) { return value < 0; }
 }  // namespace
 
 ProblemData::Client::Client(Coordinate x,
                             Coordinate y,
-                            Load delivery,
-                            Load pickup,
+                            std::vector<Load> delivery,
+                            std::vector<Load> pickup,
                             Duration serviceDuration,
                             Duration twEarly,
                             Duration twLate,
@@ -34,11 +46,11 @@ ProblemData::Client::Client(Coordinate x,
                             Cost prize,
                             bool required,
                             std::optional<size_t> group,
-                            char const *name)
+                            std::string name)
     : x(x),
       y(y),
-      delivery(delivery),
-      pickup(pickup),
+      delivery(pad(delivery, pickup)),
+      pickup(pad(pickup, delivery)),
       serviceDuration(serviceDuration),
       twEarly(twEarly),
       twLate(twLate),
@@ -46,13 +58,15 @@ ProblemData::Client::Client(Coordinate x,
       prize(prize),
       required(required),
       group(group),
-      name(duplicate(name))
+      name(duplicate(name.data()))
 {
-    if (delivery < 0)
-        throw std::invalid_argument("delivery amount must be >= 0.");
+    assert(delivery.size() == pickup.size());
 
-    if (pickup < 0)
-        throw std::invalid_argument("pickup amount must be >= 0.");
+    if (std::any_of(delivery.begin(), delivery.end(), isNegative<Load>))
+        throw std::invalid_argument("delivery amounts must be >= 0.");
+
+    if (std::any_of(pickup.begin(), pickup.end(), isNegative<Load>))
+        throw std::invalid_argument("pickup amounts must be >= 0.");
 
     if (serviceDuration < 0)
         throw std::invalid_argument("service_duration must be >= 0.");
@@ -108,6 +122,24 @@ ProblemData::Client::Client(Client &&client)
 
 ProblemData::Client::~Client() { delete[] name; }
 
+bool ProblemData::Client::operator==(Client const &other) const
+{
+    // clang-format off
+    return x == other.x
+        && y == other.y
+        && delivery == other.delivery
+        && pickup == other.pickup
+        && serviceDuration == other.serviceDuration
+        && twEarly == other.twEarly
+        && twLate == other.twLate
+        && releaseTime == other.releaseTime
+        && prize == other.prize
+        && required == other.required
+        && group == other.group
+        && std::strcmp(name, other.name) == 0;
+    // clang-format on
+}
+
 ProblemData::ClientGroup::ClientGroup(std::vector<size_t> clients,
                                       bool required)
     : required(required)
@@ -145,8 +177,8 @@ void ProblemData::ClientGroup::addClient(size_t client)
 
 void ProblemData::ClientGroup::clear() { clients_.clear(); }
 
-ProblemData::Depot::Depot(Coordinate x, Coordinate y, char const *name)
-    : x(x), y(y), name(duplicate(name))
+ProblemData::Depot::Depot(Coordinate x, Coordinate y, std::string name)
+    : x(x), y(y), name(duplicate(name.data()))
 {
 }
 
@@ -163,8 +195,13 @@ ProblemData::Depot::Depot(Depot &&depot)
 
 ProblemData::Depot::~Depot() { delete[] name; }
 
+bool ProblemData::Depot::operator==(Depot const &other) const
+{
+    return x == other.x && y == other.y && std::strcmp(name, other.name) == 0;
+}
+
 ProblemData::VehicleType::VehicleType(size_t numAvailable,
-                                      Load capacity,
+                                      std::vector<Load> capacity,
                                       size_t startDepot,
                                       size_t endDepot,
                                       Cost fixedCost,
@@ -175,7 +212,8 @@ ProblemData::VehicleType::VehicleType(size_t numAvailable,
                                       Cost unitDistanceCost,
                                       Cost unitDurationCost,
                                       size_t profile,
-                                      char const *name)
+                                      std::optional<Duration> startLate,
+                                      std::string name)
     : numAvailable(numAvailable),
       startDepot(startDepot),
       endDepot(endDepot),
@@ -188,16 +226,20 @@ ProblemData::VehicleType::VehicleType(size_t numAvailable,
       unitDistanceCost(unitDistanceCost),
       unitDurationCost(unitDurationCost),
       profile(profile),
-      name(duplicate(name))
+      startLate(startLate.value_or(twLate)),
+      name(duplicate(name.data()))
 {
     if (numAvailable == 0)
         throw std::invalid_argument("num_available must be > 0.");
 
-    if (capacity < 0)
-        throw std::invalid_argument("capacity must be >= 0.");
+    if (std::any_of(capacity.begin(), capacity.end(), isNegative<Load>))
+        throw std::invalid_argument("capacity amounts must be >= 0.");
 
-    if (twEarly > twLate)
-        throw std::invalid_argument("tw_early must be <= tw_late.");
+    if (twEarly > this->startLate)
+        throw std::invalid_argument("tw_early must be <= start_late.");
+
+    if (this->startLate > twLate)
+        throw std::invalid_argument("start_late must be <= tw_late.");
 
     if (twEarly < 0)
         throw std::invalid_argument("tw_early must be >= 0.");
@@ -231,6 +273,7 @@ ProblemData::VehicleType::VehicleType(VehicleType const &vehicleType)
       unitDistanceCost(vehicleType.unitDistanceCost),
       unitDurationCost(vehicleType.unitDurationCost),
       profile(vehicleType.profile),
+      startLate(vehicleType.startLate),
       name(duplicate(vehicleType.name))
 {
 }
@@ -248,12 +291,65 @@ ProblemData::VehicleType::VehicleType(VehicleType &&vehicleType)
       unitDistanceCost(vehicleType.unitDistanceCost),
       unitDurationCost(vehicleType.unitDurationCost),
       profile(vehicleType.profile),
+      startLate(vehicleType.startLate),
       name(vehicleType.name)  // we can steal
 {
     vehicleType.name = nullptr;  // stolen
 }
 
 ProblemData::VehicleType::~VehicleType() { delete[] name; }
+
+ProblemData::VehicleType
+ProblemData::VehicleType::replace(std::optional<size_t> numAvailable,
+                                  std::optional<std::vector<Load>> capacity,
+                                  std::optional<size_t> startDepot,
+                                  std::optional<size_t> endDepot,
+                                  std::optional<Cost> fixedCost,
+                                  std::optional<Duration> twEarly,
+                                  std::optional<Duration> twLate,
+                                  std::optional<Duration> maxDuration,
+                                  std::optional<Distance> maxDistance,
+                                  std::optional<Cost> unitDistanceCost,
+                                  std::optional<Cost> unitDurationCost,
+                                  std::optional<size_t> profile,
+                                  std::optional<Duration> startLate,
+                                  std::optional<std::string> name) const
+{
+    return {numAvailable.value_or(this->numAvailable),
+            capacity.value_or(this->capacity),
+            startDepot.value_or(this->startDepot),
+            endDepot.value_or(this->endDepot),
+            fixedCost.value_or(this->fixedCost),
+            twEarly.value_or(this->twEarly),
+            twLate.value_or(this->twLate),
+            maxDuration.value_or(this->maxDuration),
+            maxDistance.value_or(this->maxDistance),
+            unitDistanceCost.value_or(this->unitDistanceCost),
+            unitDurationCost.value_or(this->unitDurationCost),
+            profile.value_or(this->profile),
+            startLate.value_or(this->startLate),
+            name.value_or(this->name)};
+}
+
+bool ProblemData::VehicleType::operator==(VehicleType const &other) const
+{
+    // clang-format off
+    return numAvailable == other.numAvailable
+        && capacity == other.capacity
+        && startDepot == other.startDepot
+        && endDepot == other.endDepot
+        && fixedCost == other.fixedCost
+        && twEarly == other.twEarly
+        && twLate == other.twLate
+        && maxDuration == other.maxDuration
+        && maxDistance == other.maxDistance
+        && unitDistanceCost == other.unitDistanceCost
+        && unitDurationCost == other.unitDurationCost
+        && profile == other.profile
+        && startLate == other.startLate
+        && std::strcmp(name, other.name) == 0;
+    // clang-format on
+}
 
 std::vector<ProblemData::Client> const &ProblemData::clients() const
 {
@@ -321,12 +417,27 @@ size_t ProblemData::numProfiles() const
     return dists_.size();
 }
 
+size_t ProblemData::numLoadDimensions() const { return numLoadDimensions_; }
+
 void ProblemData::validate() const
 {
     // Client checks.
     for (size_t idx = numDepots(); idx != numLocations(); ++idx)
     {
         ProblemData::Client const &client = location(idx);
+
+        if (client.delivery.size() != numLoadDimensions_)
+        {
+            auto const *msg = "Client has inconsistent delivery size.";
+            throw std::invalid_argument(msg);
+        }
+
+        if (client.pickup.size() != numLoadDimensions_)
+        {
+            auto const *msg = "Client has inconsistent pickup size.";
+            throw std::invalid_argument(msg);
+        }
+
         if (!client.group)
             continue;
 
@@ -374,8 +485,17 @@ void ProblemData::validate() const
     }
 
     // Vehicle type checks.
+    if (vehicleTypes_.empty())
+        throw std::invalid_argument("Expected at least one vehicle type.");
+
     for (auto const &vehicleType : vehicleTypes_)
     {
+        if (vehicleType.capacity.size() != numLoadDimensions_)
+        {
+            auto const *msg = "Vehicle type has inconsistent capacity size.";
+            throw std::invalid_argument(msg);
+        }
+
         if (vehicleType.startDepot >= numDepots())
             throw std::out_of_range("Vehicle type has invalid start depot.");
 
@@ -428,14 +548,14 @@ ProblemData::replace(std::optional<std::vector<Client>> &clients,
                      std::optional<std::vector<VehicleType>> &vehicleTypes,
                      std::optional<std::vector<Matrix<Distance>>> &distMats,
                      std::optional<std::vector<Matrix<Duration>>> &durMats,
-                     std::optional<std::vector<ClientGroup>> &groups)
+                     std::optional<std::vector<ClientGroup>> &groups) const
 {
-    return ProblemData(clients.value_or(clients_),
-                       depots.value_or(depots_),
-                       vehicleTypes.value_or(vehicleTypes_),
-                       distMats.value_or(dists_),
-                       durMats.value_or(durs_),
-                       groups.value_or(groups_));
+    return {clients.value_or(clients_),
+            depots.value_or(depots_),
+            vehicleTypes.value_or(vehicleTypes_),
+            distMats.value_or(dists_),
+            durMats.value_or(durs_),
+            groups.value_or(groups_)};
 }
 
 ProblemData::ProblemData(std::vector<Client> clients,
@@ -455,7 +575,15 @@ ProblemData::ProblemData(std::vector<Client> clients,
                                    vehicleTypes_.end(),
                                    0,
                                    [](auto sum, VehicleType const &type)
-                                   { return sum + type.numAvailable; }))
+                                   { return sum + type.numAvailable; })),
+      numLoadDimensions_(
+          clients_.empty()
+              // If there are no clients we look at the vehicle types. If both
+              // are empty we default to 0. Clients have pickups and deliveries
+              // but the client constructor already ensures those are of equal
+              // size (within a single client).
+              ? (vehicleTypes_.empty() ? 0 : vehicleTypes_[0].capacity.size())
+              : clients_[0].delivery.size())
 {
     for (auto const &client : clients_)
     {

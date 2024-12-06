@@ -37,7 +37,10 @@ def test_route_eq(ok_small):
     Tests ``Route``'s equality operator.
     """
     data = ok_small.replace(
-        vehicle_types=[VehicleType(capacity=10), VehicleType(2, capacity=20)]
+        vehicle_types=[
+            VehicleType(capacity=[10]),
+            VehicleType(2, capacity=[20]),
+        ]
     )
 
     route1 = Route(data, [1, 2], 0)
@@ -68,17 +71,17 @@ def test_route_access_methods(ok_small):
     assert_equal(routes[1].visits(), [2, 4])
 
     # There's no excess load, so all excess load should be zero.
-    assert_equal(routes[0].excess_load(), 0)
-    assert_equal(routes[1].excess_load(), 0)
+    assert_equal(routes[0].excess_load(), [0])
+    assert_equal(routes[1].excess_load(), [0])
 
     # Total route delivery demand (and pickups, which are all zero for this
     # instance).
-    deliveries = [0] + [client.delivery for client in ok_small.clients()]
-    assert_equal(routes[0].delivery(), deliveries[1] + deliveries[3])
-    assert_equal(routes[1].delivery(), deliveries[2] + deliveries[4])
+    deliveries = [0] + [client.delivery[0] for client in ok_small.clients()]
+    assert_equal(routes[0].delivery(), [deliveries[1] + deliveries[3]])
+    assert_equal(routes[1].delivery(), [deliveries[2] + deliveries[4]])
 
-    assert_equal(routes[0].pickup(), 0)
-    assert_equal(routes[1].pickup(), 0)
+    assert_equal(routes[0].pickup(), [0])
+    assert_equal(routes[1].pickup(), [0])
 
     # The first route is not feasible due to time warp, but the second one is.
     # See also the tests below.
@@ -221,6 +224,29 @@ def test_route_release_time():
     assert_(routes[1].start_time() > routes[1].release_time())
 
 
+def test_release_time_and_max_duration():
+    """
+    Tests the interaction of release times and maximum duration constraints. In
+    particular, we verify that the maximum duration applies to the time after
+    the vehicle starts their route, and that the release time only shifts
+    that starting moment - it does not affect the overall maximum duration.
+    """
+    ok_small = read("data/OkSmallReleaseTimes.txt")
+    vehicle_type = VehicleType(3, [10], max_duration=5_000)
+    data = ok_small.replace(vehicle_types=[vehicle_type])
+
+    # This route has a release time of 5000, but should not start until much
+    # later because of the time windows. The vehicle's maximum duration is also
+    # 5000, but this is violated by 998 units of time. The route is otherwise
+    # feasible, so there is exactly 998 time warp.
+    route = Route(data, [2, 3, 4], 0)
+    assert_equal(route.release_time(), 5_000)
+    assert_equal(route.start_time(), 10_056)
+    assert_equal(route.end_time(), 15_056)
+    assert_equal(route.duration(), 5_998)
+    assert_equal(route.time_warp(), 998)
+
+
 def test_route_centroid(ok_small):
     """
     Tests that each route's center point is the center point of all clients
@@ -256,17 +282,22 @@ def test_route_can_be_pickled(rc208):
 
 
 @pytest.mark.parametrize(
-    ("tw_early", "tw_late", "expected"),
+    ("tw_early", "start_late", "tw_late", "expected"),
     [
-        (0, 0, 20_277),  # cannot be back at the depot before 20'277
-        (0, 20_000, 277),  # larger shift window decreases time warp
-        (0, 20_277, 0),  # and in this case there is no more time warp
-        (15_000, 20_000, 1_221),  # minimum route duration is 6'221
-        (10_000, 20_000, 277),  # before earliest possible return
+        (0, 0, 0, 20_277),  # cannot be back at the depot before 20'277
+        (0, 10_000, 20_000, 277),  # larger shift window decreases time warp
+        (0, 20_000, 20_000, 277),  # latest start does not affect time warp
+        (0, 20_277, 20_277, 0),  # and in this case there is no more time warp
+        (15_000, 15_000, 20_000, 1_221),  # minimum route duration is 6'221
+        (10_000, 20_000, 20_000, 277),  # before earliest possible return
     ],
 )
 def test_route_shift_duration(
-    ok_small, tw_early: int, tw_late: int, expected: int
+    ok_small,
+    tw_early: int,
+    start_late: int,
+    tw_late: int,
+    expected: int,
 ):
     """
     Tests that Route computes time warp due to shift durations correctly on a
@@ -274,7 +305,13 @@ def test_route_shift_duration(
     """
     data = ok_small.replace(
         vehicle_types=[
-            VehicleType(2, capacity=10, tw_early=tw_early, tw_late=tw_late)
+            VehicleType(
+                2,
+                capacity=[10],
+                tw_early=tw_early,
+                tw_late=tw_late,
+                start_late=start_late,
+            )
         ]
     )
 
@@ -292,8 +329,8 @@ def test_distance_duration_cost_calculations(ok_small):
     Tests route-level distance and duration cost calculations.
     """
     vehicle_types = [
-        VehicleType(capacity=10, unit_distance_cost=5, unit_duration_cost=1),
-        VehicleType(capacity=10, unit_distance_cost=1, unit_duration_cost=5),
+        VehicleType(capacity=[10], unit_distance_cost=5, unit_duration_cost=1),
+        VehicleType(capacity=[10], unit_distance_cost=1, unit_duration_cost=5),
     ]
     data = ok_small.replace(vehicle_types=vehicle_types)
 
@@ -309,7 +346,7 @@ def test_start_end_depot_not_same_on_empty_route(ok_small_multi_depot):
     Tests that empty routes correctly evaluate distance and duration travelled
     between depots, even though there are no actual clients on the route.
     """
-    vehicle_type = VehicleType(3, 10, start_depot=0, end_depot=1)
+    vehicle_type = VehicleType(3, [10], start_depot=0, end_depot=1)
     data = ok_small_multi_depot.replace(vehicle_types=[vehicle_type])
 
     route = Route(data, [], vehicle_type=0)

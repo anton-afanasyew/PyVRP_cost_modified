@@ -9,9 +9,10 @@ namespace pyvrp
 /**
  * LoadSegment(delivery: int = 0, pickup: int = 0, load: int = 0)
  *
- * Creates a new load segment. Load segments can be efficiently concatenated,
- * and track statistics about capacity violations resulting from visiting
- * clients in the concatenated order.
+ * Creates a new load segment for delivery and pickup loads in a single
+ * dimension. These load segments can be efficiently concatenated, and track
+ * statistics about capacity violations resulting from visiting clients in the
+ * concatenated order.
  *
  * Parameters
  * ----------
@@ -24,14 +25,13 @@ namespace pyvrp
  */
 class LoadSegment
 {
-    Load delivery_;
-    Load pickup_;
-    Load load_;
+    Load delivery_ = 0;
+    Load pickup_ = 0;
+    Load load_ = 0;
 
 public:
-    template <typename... Args>
-    [[nodiscard]] static LoadSegment
-    merge(LoadSegment const &first, LoadSegment const &second, Args &&...args);
+    [[nodiscard]] static inline LoadSegment merge(LoadSegment const &first,
+                                                  LoadSegment const &second);
 
     /**
      * Returns the delivery amount, that is, the total amount of load delivered
@@ -49,8 +49,10 @@ public:
      */
     [[nodiscard]] inline Load load() const;
 
-    // Construct from attributes of the given client.
-    LoadSegment(ProblemData::Client const &client);
+    LoadSegment() = default;  // default is all zero
+
+    // Construct from load attributes of the given client and dimension.
+    LoadSegment(ProblemData::Client const &client, size_t dimension);
 
     // Construct from raw data.
     inline LoadSegment(Load delivery, Load pickup, Load load);
@@ -64,22 +66,15 @@ public:
     inline LoadSegment &operator=(LoadSegment &&) = default;
 };
 
-template <typename... Args>
 LoadSegment LoadSegment::merge(LoadSegment const &first,
-                               LoadSegment const &second,
-                               Args &&...args)
+                               LoadSegment const &second)
 {
     // See Vidal et al. (2014) for details. This function implements equations
     // (9) -- (11) of https://doi.org/10.1016/j.ejor.2013.09.045.
-    LoadSegment const res = {
+    return {
         first.delivery_ + second.delivery_,
         first.pickup_ + second.pickup_,
         std::max(first.load_ + second.delivery_, second.load_ + first.pickup_)};
-
-    if constexpr (sizeof...(args) == 0)
-        return res;
-    else
-        return merge(res, args...);
 }
 
 Load LoadSegment::load() const { return load_; }

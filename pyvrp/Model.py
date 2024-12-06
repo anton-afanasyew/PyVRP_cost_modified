@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Sequence
 from warnings import warn
 
 import numpy as np
@@ -37,15 +37,15 @@ class Edge:
 
     def __init__(
         self,
-        frm: Union[Client, Depot],
-        to: Union[Client, Depot],
+        frm: Client | Depot,
+        to: Client | Depot,
         distance: int,
         duration: int,
     ):
         if distance < 0 or duration < 0:
             raise ValueError("Cannot have negative edge distance or duration.")
 
-        if frm == to and (distance != 0 or duration != 0):
+        if id(frm) == id(to) and (distance != 0 or duration != 0):
             raise ValueError("A self loop must have 0 distance and duration.")
 
         if max(distance, duration) > MAX_VALUE:
@@ -79,8 +79,8 @@ class Profile:
 
     def add_edge(
         self,
-        frm: Union[Client, Depot],
-        to: Union[Client, Depot],
+        frm: Client | Depot,
+        to: Client | Depot,
         distance: int,
         duration: int = 0,
     ) -> Edge:
@@ -106,7 +106,7 @@ class Model:
         self._vehicle_types: list[VehicleType] = []
 
     @property
-    def locations(self) -> list[Union[Client, Depot]]:
+    def locations(self) -> list[Client | Depot]:
         """
         Returns all locations (depots and clients) in the current model. The
         clients in the routes of the solution returned by :meth:`~solve` can be
@@ -185,15 +185,15 @@ class Model:
         self,
         x: int,
         y: int,
-        delivery: int = 0,
-        pickup: int = 0,
+        delivery: int | list[int] = [],
+        pickup: int | list[int] = [],
         service_duration: int = 0,
         tw_early: int = 0,
         tw_late: int = np.iinfo(np.int64).max,
         release_time: int = 0,
         prize: int = 0,
         required: bool = True,
-        group: Optional[ClientGroup] = None,
+        group: ClientGroup | None = None,
         *,
         name: str = "",
         calculate_client_from_config: bool = None,
@@ -213,8 +213,8 @@ class Model:
         """
         if group is None:
             group_idx = None
-        elif group in self._groups:
-            group_idx = self._groups.index(group)
+        elif (idx := _idx_by_id(group, self._groups)) is not None:
+            group_idx = idx
         else:
             raise ValueError("The given group is not in this model instance.")
 
@@ -239,8 +239,8 @@ class Model:
         client = Client(
             x=x,
             y=y,
-            delivery=delivery,
-            pickup=pickup,
+            delivery=[delivery] if isinstance(delivery, int) else delivery,
+            pickup=[pickup] if isinstance(pickup, int) else pickup,
             service_duration=service_duration,
             tw_early=tw_early,
             tw_late=tw_late,
@@ -292,11 +292,11 @@ class Model:
 
     def add_edge(
         self,
-        frm: Union[Client, Depot],
-        to: Union[Client, Depot],
+        frm: Client | Depot,
+        to: Client | Depot,
         distance: int,
         duration: int = 0,
-        profile: Optional[Profile] = None,
+        profile: Profile | None = None,
         calculate_edge_weight_from_config: bool = None,
         config_formula: dict = None,
     ) -> Edge:
@@ -336,9 +336,9 @@ class Model:
     def add_vehicle_type(
         self,
         num_available: int = 1,
-        capacity: int = 0,
-        start_depot: Optional[Depot] = None,
-        end_depot: Optional[Depot] = None,
+        capacity: int | list[int] = [],
+        start_depot: Depot | None = None,
+        end_depot: Depot | None = None,
         fixed_cost: int = 0,
         tw_early: int = 0,
         tw_late: int = np.iinfo(np.int64).max,
@@ -346,7 +346,8 @@ class Model:
         max_distance: int = np.iinfo(np.int64).max,
         unit_distance_cost: int = 1,
         unit_duration_cost: int = 0,
-        profile: Optional[Profile] = None,
+        profile: Profile | None = None,
+        start_late: int | None = None,
         *,
         name: str = "",
         calculate_vehicle_from_config: bool = None,
@@ -369,22 +370,22 @@ class Model:
         """
         if start_depot is None:
             start_idx = 0
-        elif start_depot in self._depots:
-            start_idx = self._depots.index(start_depot)
+        elif (idx := _idx_by_id(start_depot, self._depots)) is not None:
+            start_idx = idx
         else:
             raise ValueError("The given start depot is not in this model.")
 
         if end_depot is None:
             end_idx = 0
-        elif end_depot in self._depots:
-            end_idx = self._depots.index(end_depot)
+        elif (idx := _idx_by_id(end_depot, self._depots)) is not None:
+            end_idx = idx
         else:
             raise ValueError("The given end depot is not in this model.")
 
         if profile is None:
             profile_idx = 0
-        elif profile in self._profiles:
-            profile_idx = self._profiles.index(profile)
+        elif (idx := _idx_by_id(profile, self._profiles)) is not None:
+            profile_idx = idx
         else:
             raise ValueError("The given profile is not in this model.")
 
@@ -401,7 +402,7 @@ class Model:
 
         vehicle_type = VehicleType(
             num_available=num_available,
-            capacity=capacity,
+            capacity=[capacity] if isinstance(capacity, int) else capacity,
             start_depot=start_idx,
             end_depot=end_idx,
             fixed_cost=fixed_cost,
@@ -412,6 +413,7 @@ class Model:
             unit_distance_cost=unit_distance_cost,
             unit_duration_cost=unit_duration_cost,
             profile=profile_idx,
+            start_late=start_late,
             name=name,
         )
 
@@ -588,4 +590,16 @@ class Model:
                 routes.append(route_names)
             results.append((result, routes))
         return results
-    
+
+def _idx_by_id(item: object, container: Sequence[object]) -> int | None:
+    """
+    Obtains the index of item in the container by identity rather than equality
+    (as would happen with index()). This is important for various objects in
+    the Model, because objects that compare equal may not be the same as the
+    one intended. See #681 for a bug caused by this.
+    """
+    for idx, other in enumerate(container):
+        if item is other:
+            return idx
+
+    return None

@@ -87,8 +87,8 @@ def test_evaluate_empty_routes(ok_small):
     """
     data = ok_small.replace(
         vehicle_types=[
-            VehicleType(3, capacity=10),
-            VehicleType(3, capacity=10),
+            VehicleType(3, capacity=[10]),
+            VehicleType(3, capacity=[10]),
         ]
     )
 
@@ -120,7 +120,7 @@ def test_evaluate_capacity_differences(ok_small):
     Tests that changes in vehicle capacity violations are evaluated correctly.
     """
     data = ok_small.replace(
-        vehicle_types=[VehicleType(capacity=10), VehicleType(capacity=20)]
+        vehicle_types=[VehicleType(capacity=[10]), VehicleType(capacity=[20])]
     )
 
     route1 = Route(data, idx=0, vehicle_type=0)
@@ -136,11 +136,11 @@ def test_evaluate_capacity_differences(ok_small):
     # route1 has vehicle type 0, which has capacity 10. So there is excess load
     # since its client delivery demand sums to 15.
     assert_(route1.has_excess_load())
-    assert_equal(route1.load(), 15)
+    assert_equal(route1.load(), [15])
 
     # route2, on the other hand, has capacity 20 and a load of only 3.
     assert_(not route2.has_excess_load())
-    assert_equal(route2.load(), 3)
+    assert_equal(route2.load(), [3])
 
     op = SwapRoutes(data)
     cost_eval = CostEvaluator(40, 1, 0)
@@ -171,8 +171,8 @@ def test_evaluate_shift_time_window_differences(ok_small):
     """
     data = ok_small.replace(
         vehicle_types=[
-            VehicleType(capacity=10, tw_early=10_000, tw_late=15_000),
-            VehicleType(capacity=10, tw_early=15_000, tw_late=20_000),
+            VehicleType(capacity=[10], tw_early=10_000, tw_late=15_000),
+            VehicleType(capacity=[10], tw_early=15_000, tw_late=20_000),
         ]
     )
 
@@ -198,6 +198,52 @@ def test_evaluate_shift_time_window_differences(ok_small):
     assert_(op.evaluate(route1, route2, cost_eval) < 0)
 
 
+def test_evaluate_shift_latest_start_differences(ok_small):
+    """
+    Tests that SwapRoutes correctly evaluates changes in duration due to
+    different shift latest start times.
+    """
+    data = ok_small.replace(
+        vehicle_types=[
+            VehicleType(
+                capacity=[10],
+                tw_early=10_000,
+                tw_late=14_000,
+                unit_duration_cost=1,
+                start_late=13_000,
+            ),
+            VehicleType(
+                capacity=[10],
+                tw_early=10_000,
+                tw_late=14_000,
+                unit_duration_cost=1,
+                start_late=14_000,
+            ),
+        ]
+    )
+
+    route1 = Route(data, idx=0, vehicle_type=0)
+    for loc in [1, 4]:  # depot -> 1 -> 4 -> depot
+        route1.append(Node(loc=loc))
+    route1.update()
+
+    route2 = Route(data, idx=1, vehicle_type=1)
+    route2.update()  # depot -> depot
+
+    # Without shift time windows, the first route would be able to start
+    # between [14'056, 16'003]. Given that the latest start of the assigned
+    # vehicle type is 13'000, there is a wait before the first client of 1_056
+    # units. Swapping the vehicle types results in a lower cost, due to
+    # decreased wait time on the route (56 vs 1_056).
+    assert_equal(route1.duration(), 6_388)  # including wait of 1_056 units
+
+    # Swapping the routes results in a reduction of 1000 units of duration,
+    # since the wait before the first client is reduced.
+    op = SwapRoutes(data)
+    cost_eval = CostEvaluator(1, 1, 0)
+    assert_equal(op.evaluate(route1, route2, cost_eval), -1_000)
+
+
 def test_evaluate_max_duration_constraints(ok_small):
     """
     Tests that SwapRoutes correctly evaluates changes in time warp due to
@@ -205,8 +251,8 @@ def test_evaluate_max_duration_constraints(ok_small):
     """
     data = ok_small.replace(
         vehicle_types=[
-            VehicleType(capacity=10, max_duration=3_000),
-            VehicleType(capacity=10),
+            VehicleType(capacity=[10], max_duration=3_000),
+            VehicleType(capacity=[10]),
         ]
     )
 
@@ -288,8 +334,9 @@ def test_different_objectives(ok_small_multi_depot):
     coefficients correctly evaluates the resulting cost delta.
     """
     vehicle_types = [
-        VehicleType(unit_duration_cost=0),
+        VehicleType(capacity=[10], unit_duration_cost=0),
         VehicleType(
+            capacity=[10],
             start_depot=1,
             end_depot=1,
             unit_distance_cost=0,
