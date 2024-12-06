@@ -15,6 +15,7 @@ from pyvrp._pyvrp import (
 from pyvrp.constants import MAX_VALUE
 from pyvrp.exceptions import ScalingWarning
 from pyvrp.solve import SolveParams, solve
+import pyvrp.preprocess_data as preprocess
 
 if TYPE_CHECKING:
     from pyvrp.Result import Result
@@ -195,6 +196,9 @@ class Model:
         group: Optional[ClientGroup] = None,
         *,
         name: str = "",
+        calculate_client_from_config: bool = None,
+        edge_weight_to_depot: int = None,
+        config_formula: dict = None,
     ) -> Client:
         """
         Adds a client with the given attributes to the model. Returns the
@@ -218,6 +222,19 @@ class Model:
             # Required clients cannot be part of a mutually exclusive client
             # group, since then there's nothing to decide about.
             raise ValueError("Required client in mutually exclusive group.")
+
+        if calculate_client_from_config is True:
+            if config_formula is None:
+                config_formula = preprocess.from_config_formula(section = "config_formula")
+            if edge_weight_to_depot is None:
+                raise ValueError("edge_weight_to_depot is needed to calculate client from config.yaml but it is not provided")
+            shift_duration = preprocess.from_config_int(section = "shift_duration", default = tw_late)
+            
+            delivery = preprocess.calculate_demand(population = delivery, config_formula = config_formula)
+            tw_late = preprocess.calculate_time_budget(time = shift_duration, config_formula = config_formula)
+            service_duration = preprocess.calculate_service_duration(demand = delivery, edge_weight_to_depot = edge_weight_to_depot, shift_duration = tw_late, config_formula = config_formula)
+            service_duration = preprocess.calculate_time_budget(time = service_duration, config_formula = config_formula)
+            prize = preprocess.calculate_prize(demand = delivery, config_formula = config_formula)
 
         client = Client(
             x=x,
@@ -280,6 +297,8 @@ class Model:
         distance: int,
         duration: int = 0,
         profile: Optional[Profile] = None,
+        calculate_edge_weight_from_config: bool = None,
+        config_formula: dict = None,
     ) -> Edge:
         """
         Adds an edge :math:`(i, j)` between ``frm`` (:math:`i`) and ``to``
@@ -294,6 +313,11 @@ class Model:
            precendence over a base edge with the same ``frm`` and ``to``
            locations.
         """
+        if calculate_edge_weight_from_config is True:
+            if config_formula is None:
+                config_formula = preprocess.from_config_formula(section = "config_formula")
+            distance = preprocess.calculate_time_budget(time = distance, config_formula = config_formula)
+
         if profile is not None:
             return profile.add_edge(frm, to, distance, duration)
 
@@ -325,6 +349,8 @@ class Model:
         profile: Optional[Profile] = None,
         *,
         name: str = "",
+        calculate_vehicle_from_config: bool = None,
+        config_formula: dict = None,
     ) -> VehicleType:
         """
         Adds a vehicle type with the given attributes to the model. Returns the
@@ -361,6 +387,17 @@ class Model:
             profile_idx = self._profiles.index(profile)
         else:
             raise ValueError("The given profile is not in this model.")
+
+        if calculate_vehicle_from_config is True:
+            if config_formula is None:
+                config_formula = preprocess.from_config_formula(section = "config_formula")
+            print("Number of vehicles, capacity, tw_early, tw_late, max_duration were evaluated from config.yaml")
+            shift_duration = preprocess.from_config_int(section = "shift_duration", default = tw_late)
+
+            num_available = preprocess.from_config_int(section = "n_vehicles", default = num_available)
+            capacity = preprocess.from_config_int(section = "capacity", default = capacity)
+            tw_late = preprocess.calculate_time_budget(time = shift_duration, config_formula = config_formula)
+            max_duration = tw_late
 
         vehicle_type = VehicleType(
             num_available=num_available,
@@ -435,16 +472,16 @@ class Model:
             self._groups,
         )
 
-    def solve(
+    def solve_vrp(
         self,
         stop: StoppingCriterion,
         seed: int = 0,
         collect_stats: bool = True,
         display: bool = True,
         params: SolveParams = SolveParams(),
-    ) -> Result:
+    ) -> list[(Result, list)]:
         """
-        Solve this model.
+        Solve this model as vrp.
 
         Parameters
         ----------
@@ -462,10 +499,93 @@ class Model:
         params
             Solver parameters to use. If not provided, a default will be used.
 
-        Returns
+        list[(Result, list)]:
         -------
         Result
             A Result object, containing statistics (if collected) and the best
             found solution.
+        list
+            A list of visited clients' names
         """
-        return solve(self.data(), stop, seed, collect_stats, display, params)
+        results = []
+        routes = []
+        result = solve(self.data(), stop, seed, collect_stats, display, params)
+        for route in result.best.routes():
+            route_names = []
+            for visit_idx in route.visits():
+                client_name = self._clients[visit_idx - 1].name
+                route_names.append(client_name)
+                self._edges = [edge for edge in self._edges if edge.to.name != client_name and edge.frm.name != client_name]
+            routes.append(route_names)
+        results.append((result, routes))
+        return results
+
+    def solve_myopic_vrp(
+        self,
+        stop: StoppingCriterion,
+        seed: int = 0,
+        collect_stats: bool = True,
+        display: bool = True,
+        params: SolveParams = SolveParams(),
+    ) -> list[(Result, list)]:
+        """
+        Solve this model as myopic vrp (one route at time).
+        Supports only one vehicle type.
+
+        Parameters
+        ----------
+        stop
+            Stopping criterion to use.
+        seed
+            Seed value to use for the random number stream. Default 0.
+        collect_stats
+            Whether to collect statistics about the solver's progress. Default
+            ``True``.
+        display
+            Whether to display information about the solver progress. Default
+            ``True``. Progress information is only available when
+            ``collect_stats`` is also set, which it is by default.
+        params
+            Solver parameters to use. If not provided, a default will be used.
+
+        list[(Result, list)]:
+        -------
+        Result
+            A Result object, containing statistics (if collected) and the best
+            found solution.
+        list
+            A list of visited clients' names
+        """
+        results = []
+        routes = []
+        n_routes = self.vehicle_types[0].num_available
+        vehicles = self._vehicle_types.copy()
+        self._vehicle_types.clear()
+        for vehicle in vehicles:
+            self.add_vehicle_type(
+                num_available = 1,
+                capacity = vehicle.capacity,
+                end_depot = vehicle.end_depot,
+                fixed_cost = vehicle.fixed_cost,
+                max_duration = vehicle.max_duration,
+                max_distance = vehicle.max_distance,
+                name = vehicle.name,
+                profile = vehicle.profile,
+                start_depot = vehicle.start_depot,
+                tw_early = vehicle.tw_early,
+                tw_late = vehicle.tw_late,
+                unit_duration_cost = vehicle.unit_duration_cost,
+                unit_distance_cost = vehicle.unit_distance_cost
+            )
+        for i in range(1, n_routes + 1, 1):
+            result = solve(self.data(), stop, seed, collect_stats, display, params)
+            for route in result.best.routes():
+                route_names = []
+                for visit_idx in route.visits():
+                    client_name = self._clients[visit_idx - 1].name
+                    route_names.append(client_name)
+                    self._edges = [edge for edge in self._edges if edge.to.name != client_name and edge.frm.name != client_name]
+                routes.append(route_names)
+            results.append((result, routes))
+        return results
+    
