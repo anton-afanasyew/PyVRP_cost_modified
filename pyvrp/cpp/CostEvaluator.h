@@ -201,7 +201,7 @@ Cost CostEvaluator::penalisedCost(T const &arg) const
         cost += loadPenalty(excess, 0);
 
     if constexpr (PrizeCostEvaluatable<T>)
-        return cost + arg.uncollectedPrizes();
+        return cost - arg.prizes(); // for standart formula use "+ arg.uncollectedPrizes()"
 
     return cost;
 }
