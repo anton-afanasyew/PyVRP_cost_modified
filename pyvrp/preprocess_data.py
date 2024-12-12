@@ -18,6 +18,38 @@ def from_config_int(section: str = None, default: int = None) -> int:
         print(f"Section {section} not found. Using default value {default}")
         return default
 
+def from_config_float(section: str = None, default: float = None) -> float:
+    '''
+    Returns integer parameters from config.yaml file
+    
+    section: str = None
+    default: int = None
+    '''
+    with open("config.yaml", 'r') as file:
+        config = yaml.safe_load(file)
+    if section is None:
+        return default
+    try:
+        return config[section]
+    except KeyError:
+        print(f"Section {section} not found. Using default value {default}")
+        return default
+
+def from_config_dict(section: str) -> dict:
+    '''
+    Returns dictionary from config.yaml file
+    
+    section: str = None
+    '''
+
+    with open("config.yaml", 'r') as file:
+        config = yaml.safe_load(file)
+    try:
+        return config[section]
+    except KeyError:
+        print(f"There is no section {section} in config.yaml. Returning []")
+        return []
+
 def from_config_formula(section: str = None) -> dict:
     '''
     Returns dictionary from config.yaml file
@@ -79,7 +111,7 @@ def calculate_demand(population: int, config_formula: dict = None) -> int:
     demand = round(demand)
     return int(demand)
 
-def calculate_service_duration(demand: int, edge_weight_to_depot: int, shift_duration: int, config_formula: dict = None) -> int:
+def calculate_service_duration(population: int, edge_weight_to_depot: int, shift_duration: int, config_formula: dict = None) -> int:
     '''
     Calculate service duration in location i: \n
     $$demand * effort$$ \n
@@ -93,7 +125,7 @@ def calculate_service_duration(demand: int, edge_weight_to_depot: int, shift_dur
     '''
     if config_formula is None:
         config_formula = {"p": 1, "q": 1, "zeta": 1, "effort": 1, "alpha": 1, "beta": 1, "c": 1}
-    service_duration = demand * config_formula["effort"]
+    service_duration = population * config_formula["effort"]
 
     if service_duration > (shift_duration - edge_weight_to_depot):
         service_duration = shift_duration - edge_weight_to_depot
@@ -105,7 +137,7 @@ def calculate_service_duration(demand: int, edge_weight_to_depot: int, shift_dur
 def calculate_prize(demand: int, config_formula: dict) -> int:
     '''
     Calculate prize for visiting location i: \n
-    $$demand * p$$ \n
+    $$demand * p * q$$ \n
     Prize can not be less than 1
     
     demand: int \n

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Sequence
 from warnings import warn
 
 import numpy as np
+import copy
 
 from pyvrp._pyvrp import (
     Client,
@@ -15,7 +16,10 @@ from pyvrp._pyvrp import (
 from pyvrp.constants import MAX_VALUE
 from pyvrp.exceptions import ScalingWarning
 from pyvrp.solve import SolveParams, solve
+from pyvrp.stop.MaxDeliveries import MaxDeliveries
+from pyvrp.solve_nn import solve_nn
 import pyvrp.preprocess_data as preprocess
+
 
 if TYPE_CHECKING:
     from pyvrp.Result import Result
@@ -229,10 +233,11 @@ class Model:
             if edge_weight_to_depot is None:
                 raise ValueError("edge_weight_to_depot is needed to calculate client from config.yaml but it is not provided")
             shift_duration = preprocess.from_config_int(section = "shift_duration", default = tw_late)
+            population = delivery
             
-            delivery = preprocess.calculate_demand(population = delivery, config_formula = config_formula)
+            delivery = preprocess.calculate_demand(population = population, config_formula = config_formula)
             tw_late = preprocess.calculate_time_budget(time = shift_duration, config_formula = config_formula)
-            service_duration = preprocess.calculate_service_duration(demand = delivery, edge_weight_to_depot = edge_weight_to_depot, shift_duration = tw_late, config_formula = config_formula)
+            service_duration = preprocess.calculate_service_duration(population = population, edge_weight_to_depot = edge_weight_to_depot, shift_duration = shift_duration, config_formula = config_formula)
             service_duration = preprocess.calculate_time_budget(time = service_duration, config_formula = config_formula)
             prize = preprocess.calculate_prize(demand = delivery, config_formula = config_formula)
 
@@ -395,7 +400,7 @@ class Model:
             print("Number of vehicles, capacity, tw_early, tw_late, max_duration were evaluated from config.yaml")
             shift_duration = preprocess.from_config_int(section = "shift_duration", default = tw_late)
 
-            num_available = preprocess.from_config_int(section = "n_vehicles", default = num_available)
+            num_available = preprocess.from_config_int(section = "m", default = num_available)
             capacity = preprocess.from_config_int(section = "capacity", default = capacity)
             tw_late = preprocess.calculate_time_budget(time = shift_duration, config_formula = config_formula)
             max_duration = tw_late
@@ -510,15 +515,27 @@ class Model:
             A list of visited clients' names
         """
         results = []
-        routes = []
-        result = solve(self.data(), stop, seed, collect_stats, display, params)
-        for route in result.best.routes():
-            route_names = []
-            for visit_idx in route.visits():
-                client_name = self._clients[visit_idx - 1].name
-                route_names.append(client_name)
-                self._edges = [edge for edge in self._edges if edge.to.name != client_name and edge.frm.name != client_name]
-            routes.append(route_names)
+        if len(self.vehicle_types) > 1:
+            raise ValueError("There are more than one vehicle types. VRP with number of vehicle optimization takes only one.")
+        n_routes = self.vehicle_types[0].num_available
+
+        for i in range(1, n_routes + 1, 1):
+            routes = []
+            stop_max_deliveries = MaxDeliveries(self._clients)
+            self._vehicle_types[0] = self._vehicle_types[0].replace(num_available = i)
+
+            stop_copy = copy.copy(stop)
+            result = solve(self.data(), stop_copy, seed, collect_stats, display, params)
+            for route in result.best.routes():
+                visitied_clients = [self._clients[visit_idx - 1] for visit_idx in route.visits()]
+                route_names = [client.name for client in visitied_clients]
+
+                routes.append(route_names)
+                stop_max_deliveries(visitied_clients)
+            if stop_max_deliveries([]):
+                print(f"Maximum delivery amount was met. The search stopped at route {i}")
+                results.append((result, routes))
+                return results
         results.append((result, routes))
         return results
 
@@ -559,36 +576,71 @@ class Model:
             A list of visited clients' names
         """
         results = []
-        routes = []
+        stop_max_deliveries = MaxDeliveries(self._clients)
+
+        if len(self.vehicle_types) > 1:
+            raise ValueError("There are more than one vehicle types. Myopic VRP takes only one.")
         n_routes = self.vehicle_types[0].num_available
-        vehicles = self._vehicle_types.copy()
-        self._vehicle_types.clear()
-        for vehicle in vehicles:
-            self.add_vehicle_type(
-                num_available = 1,
-                capacity = vehicle.capacity,
-                end_depot = vehicle.end_depot,
-                fixed_cost = vehicle.fixed_cost,
-                max_duration = vehicle.max_duration,
-                max_distance = vehicle.max_distance,
-                name = vehicle.name,
-                profile = vehicle.profile,
-                start_depot = vehicle.start_depot,
-                tw_early = vehicle.tw_early,
-                tw_late = vehicle.tw_late,
-                unit_duration_cost = vehicle.unit_duration_cost,
-                unit_distance_cost = vehicle.unit_distance_cost
-            )
+        self._vehicle_types[0] = self._vehicle_types[0].replace(num_available = 1)
+
         for i in range(1, n_routes + 1, 1):
-            result = solve(self.data(), stop, seed, collect_stats, display, params)
+            routes = []
+            stop_copy = copy.copy(stop)
+            result = solve(self.data(), stop_copy, seed, collect_stats, display, params)
             for route in result.best.routes():
-                route_names = []
-                for visit_idx in route.visits():
-                    client_name = self._clients[visit_idx - 1].name
-                    route_names.append(client_name)
-                    self._edges = [edge for edge in self._edges if edge.to.name != client_name and edge.frm.name != client_name]
+                visitied_clients = [self._clients[visit_idx - 1] for visit_idx in route.visits()]
+                route_names = [client.name for client in visitied_clients]
+                
+                self._edges = [edge for edge in self._edges if edge.to.name not in route_names and edge.frm.name not in route_names] # delete edges from and to visited clients
+                self._clients = [client for client in self._clients if client.name not in route_names] # delete visited clients
+
                 routes.append(route_names)
+                stop_max_deliveries(visitied_clients)
             results.append((result, routes))
+            if stop_max_deliveries([]):
+                print(f"Maximum delivery amount was met. The search stopped at route {i}")
+                return results
+        return results
+    
+    def solve_nn(
+        self,
+        prize_weighted: bool = None,
+    ) -> list[str]:
+        """
+        Solve this model using nearest neighbor algoritm.
+        Supports only one vehicle type.
+
+        Parameters
+        ----------
+        prize_weighted
+            Weight edge cost on prizes.
+
+        list[str]:
+        -------
+        list
+            A list of visited clients' names
+        """
+        results = []
+        stop_max_deliveries = MaxDeliveries(self._clients)
+
+        if len(self.vehicle_types) > 1:
+            raise ValueError("There are more than one vehicle types. Myopic VRP takes only one.")
+        n_routes = self.vehicle_types[0].num_available
+        self._vehicle_types[0] = self._vehicle_types[0].replace(num_available = 1)
+
+        for i in range(1, n_routes + 1, 1):
+            route = solve_nn(depot0 = self._depots[0], clients = self._clients, edges = self._edges, max_duration = self._vehicle_types[0].max_duration, prize_weighted = prize_weighted)
+            visitied_clients = [client for client in self._clients if client.name in route]
+            
+            self._edges = [edge for edge in self._edges if edge.to.name not in route and edge.frm.name not in route] # delete edges from and to visited clients
+            self._clients = [client for client in self._clients if client.name not in route] # delete visited clients
+
+            stop_max_deliveries(visitied_clients)
+
+            results.append(([route]))
+            if stop_max_deliveries([]):
+                print(f"Maximum delivery amount was met. The search stopped at route {i}")
+                return results
         return results
 
 def _idx_by_id(item: object, container: Sequence[object]) -> int | None:
